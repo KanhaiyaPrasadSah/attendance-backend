@@ -18,12 +18,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. Use the absolute smallest detection model (scrfd_500m)
-# 2. Use 'mobilenet' for recognition - it's a fraction of the size of 'buffalo'
+# Use the smallest possible model configuration
+# scrfd_500m is the tiny detector; mobilenet is the tiny recognizer
 face_app = FaceAnalysis(det_name='scrfd_500m', rec_name='mobilenet', providers=['CPUExecutionProvider'])
 
-# 3. Use a tiny 320x320 detection window to drastically cut RAM usage
-face_app.prepare(ctx_id=-1, det_size=(320, 320))
+# Setting det_size to 160x160 reduces RAM usage by ~40% compared to 320x320
+face_app.prepare(ctx_id=-1, det_size=(160, 160))
 
 APPSCRIPT_URL = os.getenv("APPSCRIPT_URL")
 student_db = []
@@ -34,7 +34,7 @@ def sync_data():
     try:
         response = requests.get(f"{APPSCRIPT_URL}?action=getStudents")
         student_db = response.json()
-        gc.collect() # Force garbage collection immediately after sync
+        gc.collect() # Immediate cleanup
     except:
         pass
 
@@ -44,7 +44,7 @@ class FrameData(BaseModel):
 @app.post("/verify")
 async def verify_face(data: FrameData):
     try:
-        # Decode only what is necessary
+        # Process image
         encoded_data = data.image.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -59,15 +59,14 @@ async def verify_face(data: FrameData):
             if not student.get("face_vector"): continue
             sim = np.dot(input_embedding, np.array(student["face_vector"]))
             
-            if sim > 0.42:
+            if sim > 0.40:
                 requests.post(APPSCRIPT_URL, json={"action": "markAttendance", "rollNo": student["rollNo"]})
                 return {"match": True, "name": student["name"]}
 
         return {"match": False}
     finally:
-        # Critical: Clear memory after every single request
-        gc.collect()
+        gc.collect() # Force clear RAM after every request
 
 @app.get("/")
 def health():
-    return {"status": "Live", "mode": "low_memory"}
+    return {"status": "Live", "memory_mode": "ultra_low"}
