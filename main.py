@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import base64
 import gc
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from insightface.app import FaceAnalysis
@@ -18,40 +18,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Use the smallest possible model configuration
-# scrfd_500m is the tiny detector; mobilenet is the tiny recognizer
-face_app = FaceAnalysis(det_name='scrfd_500m', rec_name='mobilenet', providers=['CPUExecutionProvider'])
+# Define face_app as None initially to speed up server start
+face_app = None
 
-# Setting det_size to 160x160 reduces RAM usage by ~40% compared to 320x320
-face_app.prepare(ctx_id=-1, det_size=(160, 160))
+def get_face_app():
+    global face_app
+    if face_app is None:
+        # Initializing only the absolute necessary components
+        face_app = FaceAnalysis(
+            det_name='scrfd_500m', 
+            rec_name='mobilenet', 
+            providers=['CPUExecutionProvider']
+        )
+        face_app.prepare(ctx_id=-1, det_size=(160, 160))
+    return face_app
 
 APPSCRIPT_URL = os.getenv("APPSCRIPT_URL")
 student_db = []
 
 @app.on_event("startup")
-def sync_data():
+async def startup_event():
+    # Load students but don't load the AI model yet to avoid port-binding timeout
     global student_db
     try:
-        response = requests.get(f"{APPSCRIPT_URL}?action=getStudents")
+        response = requests.get(f"{APPSCRIPT_URL}?action=getStudents", timeout=10)
         student_db = response.json()
-        gc.collect() # Immediate cleanup
-    except:
-        pass
+        gc.collect()
+    except Exception as e:
+        print(f"Startup warning: {e}")
 
 class FrameData(BaseModel):
     image: str
 
 @app.post("/verify")
 async def verify_face(data: FrameData):
+    global student_db
     try:
-        # Process image
+        # Lazy load the AI model here
+        handler = get_face_app()
+        
         encoded_data = data.image.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        faces = face_app.get(img)
+        faces = handler.get(img)
         if not faces:
-            return {"match": False}
+            return {"match": False, "message": "No face detected"}
 
         input_embedding = faces[0].normed_embedding
 
@@ -64,9 +76,11 @@ async def verify_face(data: FrameData):
                 return {"match": True, "name": student["name"]}
 
         return {"match": False}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        gc.collect() # Force clear RAM after every request
+        gc.collect()
 
 @app.get("/")
 def health():
-    return {"status": "Live", "memory_mode": "ultra_low"}
+    return {"status": "Live", "port_detected": True}
