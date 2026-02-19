@@ -1,4 +1,4 @@
- # Use a stable Python base
+# Use a stable Python base
 FROM python:3.9-slim
 
 # Install system dependencies and C++ compiler (g++)
@@ -16,14 +16,15 @@ WORKDIR /app
 # Upgrade pip and install requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip
+# We install one by one to keep memory spikes low
+RUN pip install --no-cache-dir numpy==1.23.5
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application code
 COPY . .
 
-# Pre-download the AI models (Buffalo_L) 
-# This prevents the server from crashing due to long download times on first request
-RUN python -c "from insightface.app import FaceAnalysis; face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']); face_app.prepare(ctx_id=-1)"
+# We REMOVED the "RUN python -c..." line to save memory during build
 
 # Start the FastAPI application
+# The models will download the very first time you visit the URL
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
