@@ -1,15 +1,17 @@
-import numpy as np
-import faiss
-import requests
-import cv2
 import os
-from fastapi import FastAPI, UploadFile, File
-from insightface.app import FaceAnalysis
+import cv2
+import numpy as np
+import requests
+import base64
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from insightface.app import FaceAnalysis
 
+# 1. Initialize FastAPI
 app = FastAPI()
 
-# Enable CORS so your React Frontend can talk to this Backend
+# Enable CORS for React Frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,69 +19,71 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. Initialize AI Model (Buffalo_L)
-# This model converts a face image into a 512-dimension mathematical vector
-face_app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-face_app.prepare(ctx_id=-1, det_size=(640, 640))
+# 2. Configuration & Environment Variables
+# Use buffalo_s (small) to avoid Out of Memory errors
+face_app = FaceAnalysis(name='buffalo_s', providers=['CPUExecutionProvider'])
+face_app.prepare(ctx_id=-1)
 
-# 2. In-Memory Search Index (FAISS)
-index = faiss.IndexFlatIP(512) 
-index_keys = [] 
-
-# 3. Get your AppScript URL from Render Environment Variables
 APPSCRIPT_URL = os.getenv("APPSCRIPT_URL")
+student_db = []  # Local cache of student data
 
+# 3. Data Models
+class FrameData(BaseModel):
+    image: str  # Base64 encoded image from webcam
+
+# 4. Helper: Sync Data from Google Sheets
 @app.on_event("startup")
-async def sync_database():
-    """Syncs Column T from Google Sheets into Server RAM on startup"""
-    global index_keys
-    print("🚀 Starting RAM Sync with Google Sheets...")
+def sync_data():
+    global student_db
     try:
-        response = requests.get(f"{APPSCRIPT_URL}?action=getVectors").json()
-        if response.get("status") == "success":
-            embeddings = []
-            for item in response["data"]:
-                if item["vector"]:
-                    # Convert string vector from Col T to Numpy Array
-                    vec = np.fromstring(item["vector"], sep=',').astype('float32')
-                    embeddings.append(vec)
-                    index_keys.append(item["htNo"])
-            
-            if embeddings:
-                index.add(np.stack(embeddings))
-                print(f"✅ Sync Complete: {len(index_keys)} students loaded in RAM.")
-            else:
-                print("⚠️ Sync Warning: No face vectors found in Sheet.")
+        response = requests.get(f"{APPSCRIPT_URL}?action=getStudents")
+        data = response.json()
+        student_db = data
+        print(f"✅ Sync Complete: {len(student_db)} students loaded.")
     except Exception as e:
-        print(f"❌ RAM Sync Failed: {e}")
+        print(f"❌ Sync Failed: {e}")
 
-@app.post("/identify")
-async def identify(file: UploadFile = File(...)):
-    """Receives face crop from React and finds the student ID"""
-    contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
-    faces = face_app.get(img)
-    if not faces:
-        return {"status": "no_face"}
-    
-    # Generate vector for the live face
-    live_vec = faces[0].normed_embedding.astype('float32').reshape(1, -1)
-    
-    # Search RAM index for the closest match
-    D, I = index.search(live_vec, k=1)
-    
-    # 0.65 is the sweet spot for Buffalo_L accuracy
-    if D[0][0] > 0.65:
-        return {
-            "status": "success", 
-            "htNo": index_keys[I[0][0]], 
-            "confidence": float(D[0][0])
-        }
-    
-    return {"status": "unknown"}
+# 5. Core Logic: Recognition Endpoint
+@app.post("/verify")
+async def verify_face(data: FrameData):
+    try:
+        # Decode base64 image
+        encoded_data = data.image.split(',')[1]
+        nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        # Detect faces
+        faces = face_app.get(img)
+        if not faces:
+            return {"match": False, "message": "No face detected"}
+
+        input_embedding = faces[0].normed_embedding
+
+        # Compare with Database
+        for student in student_db:
+            if not student.get("face_vector"): continue
+            
+            db_vector = np.array(student["face_vector"])
+            # Calculate Cosine Similarity
+            sim = np.dot(input_embedding, db_vector)
+            
+            if sim > 0.45:  # Similarity Threshold
+                # Send Attendance to Google Sheets
+                requests.post(APPSCRIPT_URL, json={
+                    "action": "markAttendance",
+                    "rollNo": student["rollNo"]
+                })
+                return {
+                    "match": True, 
+                    "name": student["name"], 
+                    "rollNo": student["rollNo"]
+                }
+
+        return {"match": False, "message": "Face not recognized"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
-def health_check():
-    return {"status": "online", "students_loaded": len(index_keys)}
+def health():
+    return {"status": "Live", "model": "buffalo_s", "students_loaded": len(student_db)}
