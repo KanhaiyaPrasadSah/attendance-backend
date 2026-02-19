@@ -13,6 +13,8 @@ ENV MKL_NUM_THREADS=1
 ENV OPENBLAS_NUM_THREADS=1
 ENV VECLIB_MAXIMUM_THREADS=1
 ENV NUMEXPR_NUM_THREADS=1
+# Prevent Python from buffering logs (saves a small amount of RAM)
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
@@ -23,5 +25,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# --limit-concurrency 1 ensures only one person is processed at a time
+# --limit-concurrency 1 is mandatory for the Free tier
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000", "--workers", "1", "--limit-concurrency", "1"]
