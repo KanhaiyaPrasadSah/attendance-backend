@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import base64
 import gc
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from insightface.app import FaceAnalysis
@@ -18,10 +18,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Use 'antelopev2' - it is extremely small and memory-efficient
-# This is critical for staying under 512MB
-face_app = FaceAnalysis(name='antelopev2', providers=['CPUExecutionProvider'])
-face_app.prepare(ctx_id=-1, det_size=(320, 320)) # Smaller detection size saves RAM
+# 1. Use the absolute smallest detection model (scrfd_500m)
+# 2. Use 'mobilenet' for recognition - it's a fraction of the size of 'buffalo'
+face_app = FaceAnalysis(det_name='scrfd_500m', rec_name='mobilenet', providers=['CPUExecutionProvider'])
+
+# 3. Use a tiny 320x320 detection window to drastically cut RAM usage
+face_app.prepare(ctx_id=-1, det_size=(320, 320))
 
 APPSCRIPT_URL = os.getenv("APPSCRIPT_URL")
 student_db = []
@@ -32,10 +34,9 @@ def sync_data():
     try:
         response = requests.get(f"{APPSCRIPT_URL}?action=getStudents")
         student_db = response.json()
-        print(f"✅ Sync Complete: {len(student_db)} students loaded.")
-        gc.collect() # Force clear memory after sync
-    except Exception as e:
-        print(f"❌ Sync Failed: {e}")
+        gc.collect() # Force garbage collection immediately after sync
+    except:
+        pass
 
 class FrameData(BaseModel):
     image: str
@@ -43,32 +44,30 @@ class FrameData(BaseModel):
 @app.post("/verify")
 async def verify_face(data: FrameData):
     try:
+        # Decode only what is necessary
         encoded_data = data.image.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         faces = face_app.get(img)
         if not faces:
-            return {"match": False, "message": "No face detected"}
+            return {"match": False}
 
         input_embedding = faces[0].normed_embedding
 
         for student in student_db:
             if not student.get("face_vector"): continue
-            db_vector = np.array(student["face_vector"])
-            sim = np.dot(input_embedding, db_vector)
+            sim = np.dot(input_embedding, np.array(student["face_vector"]))
             
-            if sim > 0.4:
-                requests.post(APPSCRIPT_URL, json={
-                    "action": "markAttendance",
-                    "rollNo": student["rollNo"]
-                })
-                return {"match": True, "name": student["name"], "rollNo": student["rollNo"]}
+            if sim > 0.42:
+                requests.post(APPSCRIPT_URL, json={"action": "markAttendance", "rollNo": student["rollNo"]})
+                return {"match": True, "name": student["name"]}
 
-        return {"match": False, "message": "Not recognized"}
+        return {"match": False}
     finally:
-        gc.collect() # Clean up after every request to stay under 512MB
+        # Critical: Clear memory after every single request
+        gc.collect()
 
 @app.get("/")
 def health():
-    return {"status": "Live", "model": "antelopev2"}
+    return {"status": "Live", "mode": "low_memory"}
