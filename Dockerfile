@@ -7,10 +7,12 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# LIMIT THREADS TO REDUCE RAM CONSUMPTION
+# Force AI libraries to use ONLY 1 thread to stay under 400MB
 ENV OMP_NUM_THREADS=1
 ENV MKL_NUM_THREADS=1
 ENV OPENBLAS_NUM_THREADS=1
+ENV VECLIB_MAXIMUM_THREADS=1
+ENV NUMEXPR_NUM_THREADS=1
 
 WORKDIR /app
 
@@ -21,5 +23,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Use 1 worker only to minimize memory overhead
+# --limit-concurrency 1 ensures only one person is processed at a time
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000", "--workers", "1", "--limit-concurrency", "1"]
